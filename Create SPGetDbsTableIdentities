@@ -1,0 +1,110 @@
+CREATE OR ALTER PROCEDURE GetDbsTableIdentities
+AS
+BEGIN
+SET NOCOUNT ON;
+
+DECLARE @xml NVARCHAR(MAX)
+DECLARE @body NVARCHAR(MAX)
+DECLARE @SQL  NVARCHAR(max);
+DECLARE @DatabaseName VARCHAR(64);
+
+DROP TABLE IF EXISTS #TempResults
+CREATE TABLE #TempResults (
+		DatabaseName VARCHAR(128)	,
+		TableName	 VARCHAR(128),
+		IdColumnName VARCHAR(128)	,	
+		IdColumnType VARCHAR(128)	,
+		seed_value	 BIGINT,
+		increment_value	BIGINT,
+		last_Value	 BIGINT,
+		LIMIT BIGINT,
+		Percentage NVARCHAR(128)
+
+)
+
+
+DECLARE curGetDatabases CURSOR FAST_FORWARD FOR
+SELECT NAME FROM sys.databases D WHERE D.database_id >4 and D.state_desc = 'ONLINE'
+
+Open curGetDatabases
+FETCH NEXT FROM curGetDatabases INTO @DatabaseName
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+SET @SQL = ' USE '+QUOTENAME(@DatabaseName)+';
+		WITH CTE AS (
+		SELECT 
+		TableName = t.Name,
+		IdColumnName = ic.name,
+		IdColumnType = ty.name,
+		CONVERT(INT,ic.seed_value)as seed_value,
+		CONVERT(INT,ic.increment_value)as increment_value,
+		CONVERT(INT,ic.last_value) as last_value,
+		CASE ty.name
+			 WHEN ''tinyint'' THEN 255
+			 WHEN  ''smallint'' THEN 32767
+			 WHEN  ''int'' THEN 2147483647
+			 WHEN ''bigint'' THEN 9223372036854775807
+		END AS Limit
+	FROM 
+		sys.identity_columns ic
+	INNER JOIN
+		sys.tables t ON t.object_id = ic.object_id
+	INNER JOIN
+		sys.types ty ON ty.user_type_id = ic.user_type_id
+		)
+
+	SELECT 
+       
+		   DB_NAME(),
+		   CTE.TableName,
+		   CTE.IdColumnName,
+		   CTE.IdColumnType,
+		   CTE.seed_value,
+		   CTE.increment_value,
+		   CONVERT(INT,ISNULL(CTE.last_value, 0)) AS last_Value,
+		   CONVERT(INT,CTE.Limit),
+		   FORMAT((1.0 * CONVERT(BIGINT, ISNULL(CTE.last_value, 1))) / CONVERT(BIGINT, CTE.Limit), ''P2'') AS Percentage
+       
+	FROM CTE 
+	WHERE 100.0 * CONVERT(BIGINT, ISNULL(CTE.last_value, 1)) / CONVERT(BIGINT, CTE.Limit) > 0 -- T H R E S H O L D
+	ORDER BY CTE.last_value DESC; 
+
+'
+
+INSERT INTO #TempResults
+EXEC(@SQL)
+
+    FETCH NEXT FROM curGetDatabases INTO @DatabaseName
+END
+CLOSE curGetDatabases
+DEALLOCATE curGetDatabases
+
+IF EXISTS(SELECT * FROM #TempResults)
+BEGIN
+
+
+	SET @xml = CAST(( SELECT DatabaseName AS 'td','',TableName AS 'td','',  IdColumnName AS 'td','', IdColumnType AS 'td','', seed_value AS 'td','', increment_value AS 'td','', last_Value AS 'td','', LIMIT AS 'td','', Percentage AS 'td',''
+	FROM #TempResults ORDER BY Percentage DESC
+	FOR XML PATH('tr'), ELEMENTS ) AS NVARCHAR(MAX))
+
+	SET @body ='<html><body><H3>  Tables That identities that will expire Sooner </H3>
+	<table border = 1 
+  > 
+	<tr>
+	<th background-color: #4CAF50; color: white;> DatabaseName </th> <th> TableName</th> <th> IdColumnName </th> <th> IdColumnType </th> <th> seed_value </th> <th> increment_value </th> <th> last_Value </th> <th> LIMIT </th> <th> Percentage </th>   </tr>'    
+
+	SET @body = @body + @xml +'</table></body></html>'
+
+	EXEC msdb.dbo.sp_send_dbmail
+	@profile_name = '   ', -- replace with your SQL Database Mail Profile 
+	@body = @body,
+	@body_format ='HTML',
+	@recipients = '   @outlook.com', -- replace with your email address
+	@subject = 'Table Identity Fields that Will expire sooner' ;
+
+	PRINT @body
+
+END
+
+END
